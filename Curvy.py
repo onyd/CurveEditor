@@ -1,13 +1,30 @@
+"""
+author: Anthony Dard
+description: this script is a tkinter GUI curve editor which allows user to:
+-add/remove point on  the canvas
+-drag the points on the canvas
+-select and edit coordinates of a point on th canvas (validate with enter)
+-choose the algorithm used to compute the curve
+-change the resolution of final linear interpolation of the curve
+-reset button clear all points
+
+To add algorithm, see the __init__ doc of CurveEditorWindow
+"""
+
+import time
 from tkinter import *
 import numpy as np
 from itertools import chain
+from MultiIntEntry import MultIntiEntry
+import matplotlib.pyplot as plt
+from Cholesky import solve
 
 
 class CurveEditorWindow(Tk):
     def __init__(self, compute_algorithms) -> None:
-        """compute_algorithms is a list of tuple {"name" : string, "algo" : function, "weighted" : bool, "knotted": bool) which 
+        """compute_algorithms is a list of dict {"name" : string, "algo" : function, "weighted" : bool, "knotted": bool) which 
         -string is the text in button selection of algorithm
-        -function has the signature: def <name>(points, T) 
+        -function has the signature: def <name>(points, [weights], [knots], T, canvas_size) -> list of points
             where points is the list of points drawn on the canvas and T the array of t in [0; 1] with resolution given by the slider
         -weighted precise if weights are needeed and passed in arguments
         -knotted precise if knots are needeed and passed in arguments"""
@@ -18,11 +35,13 @@ class CurveEditorWindow(Tk):
 
         self._selected_data = {"x": 0, "y": 0, 'item': None}
         self.radius = 5
-        self.curve = None
         self.compute_algorithms = compute_algorithms
+        self.n_points = 0
 
         self.rowconfigure([0, 1], weight=1, minsize=200)
         self.columnconfigure([0, 1], weight=1, minsize=200)
+
+        self.columnconfigure(2, weight=0, minsize=200)
 
         self.setup_canvas()
         self.setup_panel()
@@ -45,43 +64,51 @@ class CurveEditorWindow(Tk):
     def setup_panel(self):
         # Right panel for options
         self.frame_pannel = Frame(self, relief=RAISED, bg="#e1e1e1")
-        self.frame_curve_type = Frame(self.frame_pannel)
-        self.frame_edit_type = Frame(self.frame_pannel)
-        self.frame_edit_position = Frame(self.frame_pannel)
-        self.frame_resolution_sliders = Frame(self.frame_pannel)
-        self.frame_weights_sliders = Frame(self.frame_pannel)
-        self.frame_knots_entry = Frame(self.frame_pannel)
+        self.frame_curve_type = Frame(self.frame_pannel, bg="#e1e1e1")
+        self.frame_edit_mode = Frame(self.frame_pannel, bg="#e1e1e1")
+        self.frame_edit_position = Frame(self.frame_pannel, bg="#e1e1e1")
+        self.frame_resolution_sliders = Frame(self.frame_pannel, bg="#e1e1e1")
+        self.frame_weights_sliders = Frame(self.frame_pannel, bg="#e1e1e1")
+        self.frame_knots_entry = Frame(self.frame_pannel, bg="#e1e1e1")
+        self.frame_parameter = Frame(self.frame_pannel, bg="#e1e1e1")
 
         # Selection of curve type
+        self.label_curve_type = Label(self.frame_curve_type,
+                                      text="Curve algorithms:")
+        self.label_curve_type.grid(row=0, column=1)
         curve_types = [algo['name'] for algo in self.compute_algorithms]
-        curve_types_val = list(range(len(self.compute_algorithms)))
-        self.curve_type = IntVar()
-        self.curve_type.set(curve_types_val[0])
 
-        self.radio_curve_buttons = [None] * len(self.compute_algorithms)
+        self.check_curve_buttons = [None] * len(self.compute_algorithms)
+        self.curve_types = [
+            IntVar() for _ in range(len(self.compute_algorithms))
+        ]
         for i in range(len(self.compute_algorithms)):
-            self.radio_curve_buttons[i] = Radiobutton(self.frame_curve_type,
-                                                      variable=self.curve_type,
-                                                      text=curve_types[i],
-                                                      value=curve_types_val[i],
-                                                      bg="#e1e1e1")
-            self.radio_curve_buttons[i].grid(row=i // 4, column=i % 4)
-            self.radio_curve_buttons[i].bind(
-                "<ButtonRelease-1>",
-                lambda event: self.graph.after(100, lambda: self.draw_curve()))
+            self.check_curve_buttons[i] = Checkbutton(
+                self.frame_curve_type,
+                text=curve_types[i],
+                onvalue=1,
+                offvalue=0,
+                variable=self.curve_types[i],
+                fg=self.compute_algorithms[i]['color'])
+            self.check_curve_buttons[i].grid(row=i // 3 + 1, column=i % 3)
+            self.check_curve_buttons[i].bind(
+                "<ButtonRelease-1>", lambda event: self.graph.after(
+                    100, lambda: self.handle_algo_selection()))
 
         # Selection of edit mode
-        edit_types = ['Add', 'Remove', 'Drag', 'Select']
-        edit_types_val = ["add", "remove", "drag", "select"]
-        self.edit_types = StringVar()
-        self.edit_types.set(edit_types_val[0])
+        self.label_edit_mode = Label(self.frame_edit_mode, text="Edit mode")
+        self.label_edit_mode.pack()
+        edit_mode = ['Add', 'Remove', 'Drag', 'Select']
+        edit_mode_val = ["add", "remove", "drag", "select"]
+        self.edit_mode = StringVar()
+        self.edit_mode.set(edit_mode_val[0])
 
         self.radio_edit_buttons = [None] * 4
         for i in range(4):
-            self.radio_edit_buttons[i] = Radiobutton(self.frame_edit_type,
-                                                     variable=self.edit_types,
-                                                     text=edit_types[i],
-                                                     value=edit_types_val[i],
+            self.radio_edit_buttons[i] = Radiobutton(self.frame_edit_mode,
+                                                     variable=self.edit_mode,
+                                                     text=edit_mode[i],
+                                                     value=edit_mode_val[i],
                                                      bg="#e1e1e1")
             self.radio_edit_buttons[i].pack(side='left', expand=1)
             self.radio_edit_buttons[i].bind(
@@ -123,6 +150,7 @@ class CurveEditorWindow(Tk):
         self.slider_resolution.bind("<ButtonRelease-1>",
                                     lambda event: self.draw_curve())
 
+        # Weights
         self.label_weights = Label(self.frame_weights_sliders,
                                    text="Weights: ")
         self.slider_weights = Scale(self.frame_weights_sliders,
@@ -136,18 +164,46 @@ class CurveEditorWindow(Tk):
         self.slider_weights.pack(fill="x")
         self.slider_weights.bind("<ButtonRelease-1>", self.update_weight)
 
+        # Knots
         self.label_knots = Label(self.frame_knots_entry, text="knots: ")
-        self.knots = StringVar()
-        self.entry_knots = Entry(self.frame_knots_entry,
-                                 textvariable=self.knots)
-        self.label_knots.pack(side=LEFT)
-        self.entry_knots.pack(fill="x")
+        self.label_knots.grid(row=0, column=0)
+        self.entry_knots = MultIntiEntry(self.frame_knots_entry, 1, [0],
+                                         self.draw_curve)
+        self.entry_knots.grid(row=0, column=1)
 
-        self.entry_knots.bind("<KeyPress-Return>",
-                              lambda event: self.draw_curve())
-        self.entry_knots.bind("<KeyPress-KP_Enter>",
-                              lambda event: self.draw_curve())
+        self.label_degree = Label(self.frame_knots_entry, text="degree: ")
+        self.label_degree.grid(row=1, column=0)
+        self.entry_degree = Entry(self.frame_knots_entry)
+        self.entry_degree.insert(0, "3")
+        self.entry_degree.grid(row=1, column=1)
+        self.entry_degree.bind("<KeyPress-Return>",
+                               lambda event: self.draw_curve())
+        self.entry_degree.bind("<KeyPress-KP_Enter>",
+                               lambda event: self.draw_curve())
 
+        self.label_knots_fill = Label(self.frame_knots_entry,
+                                      text="knots fill: ")
+        self.label_knots_fill.grid(row=2, column=0)
+        self.button_uniform_fill = Button(self.frame_knots_entry,
+                                          text="uniform")
+        self.button_uniform_fill.grid(row=2, column=1)
+        self.button_uniform_fill.bind("<ButtonRelease-1>", self.uniform_fill)
+
+        # Parameter
+        self.label_parameter = Label(self.frame_parameter, text="parameter: ")
+        self.slider_parameter = Scale(self.frame_parameter,
+                                      from_=0.0,
+                                      to=1.0,
+                                      resolution=0.05,
+                                      orient=HORIZONTAL,
+                                      bg="#e1e1e1")
+        self.slider_parameter.set(0.5)
+        self.label_parameter.pack(side=LEFT)
+        self.slider_parameter.pack(fill="x")
+        self.slider_parameter.bind("<ButtonRelease-1>",
+                                   lambda event: self.draw_curve())
+
+        # Frame pack
         self.frame_pannel.grid(row=0,
                                column=2,
                                padx=2,
@@ -155,11 +211,9 @@ class CurveEditorWindow(Tk):
                                rowspan=2,
                                sticky="nswe")
         self.frame_curve_type.pack(fill="x")
-        self.frame_edit_type.pack(fill="x")
+        self.frame_edit_mode.pack(fill="x")
         self.frame_edit_position.pack(fill="x")
         self.frame_resolution_sliders.pack(fill="x")
-        self.frame_weights_sliders.pack(fill="x")
-        self.frame_knots_entry.pack(fill="x")
 
         self.button_reset = Button(self.frame_pannel, text="Reset")
         self.button_reset.pack(side=BOTTOM, fill="x")
@@ -184,15 +238,6 @@ class CurveEditorWindow(Tk):
                 self.graph.gettags(item)[1][7:]))  # Get weight from tags
         return weights
 
-    def get_knots(self):
-        knots = [""]
-        for c in self.knots.get():
-            if c != " ":
-                knots[-1] += c
-            else:
-                knots.append("")
-        return [float(knot) for knot in knots]
-
     def create_point(self, x, y, color):
         """Create a token at the given coordinate in the given color"""
         item = self.graph.create_oval(x - self.radius,
@@ -202,6 +247,7 @@ class CurveEditorWindow(Tk):
                                       outline=color,
                                       fill=color,
                                       tags=("control_points", f"weight_{1.0}"))
+        self.n_points += 1
         return item
 
     def draw_polygon(self):
@@ -215,47 +261,79 @@ class CurveEditorWindow(Tk):
                                    fill="blue",
                                    tags="control_polygon")
 
+    def animate(self, algo, steps, interval):
+        curves = []
+        for step in steps:
+            self.graph.delete("animated")
+            T = np.linspace(0, 1, self.slider_resolution.get())
+            canvas_size = (self.graph.winfo_width(), self.graph.winfo_height())
+            curves.append(
+                np.array(algo['algo'](*self.get_args(
+                    {
+                        "points": self.get_points,
+                        "weights": self.get_weights,
+                        "knots": self.entry_knots.get,
+                        "degree": self.entry_degree.get
+                    },
+                    algo=algo), T, canvas_size, step)))
+
+            for i in range(0, curves[-1].shape[0] - 1):
+                self.graph.create_line(curves[-1][i, 0],
+                                       curves[-1][i, 1],
+                                       curves[-1][i + 1, 0],
+                                       curves[-1][i + 1, 1],
+                                       fill=algo['color'],
+                                       width=3,
+                                       tags=("curve", "animated"))
+                self.graph.update()
+
+            time.sleep(interval / 1000)
+        algo['animated']['callback'](curves, T, canvas_size, steps)
+
     def draw_curve(self):
         self.graph.delete("curve")
-        points = self.get_points()
-        if len(points) <= 1:
-            return
 
-        # Select algorithm with right arguments
-        k = self.curve_type.get()
-        self.curve = np.array(
-            self.compute_algorithms[k]['algo'](*self.get_args(
-                {
-                    "points":
-                    self.get_points,
-                    "weights":
-                    self.get_weights,
-                    "knots":
-                    self.get_knots,
-                    "T":
-                    np.linspace(0, 1, self.slider_resolution.get()),
-                    "canvas_size": (self.graph.winfo_width(),
-                                    self.graph.winfo_height())
-                },
-                weighted=self.compute_algorithms[k]['weighted'],
-                knotted=self.compute_algorithms[k]['knotted'])))
+        # Select algorithms with right arguments
+        animated_algorithms = []
+        algorithms = []
+        for i, curve_type in enumerate(self.curve_types):
+            if curve_type.get() != 0:
+                if "animated" in self.compute_algorithms[i]:
+                    animated_algorithms.append(self.compute_algorithms[i])
+                else:
+                    algorithms.append(self.compute_algorithms[i])
 
-        colors = ['green', 'black', 'purple', 'yellow']
-        ic = 0
-        for i in range(0, self.curve.shape[0] - 1):
-            if np.isnan(np.sum(self.curve[i, :])):
-                ic = (ic + 1) % len(colors)
-                continue
-            if np.isnan(np.sum(self.curve[i + 1, :])):
-                continue
+        curves = []
+        colors = []
+        for algo in algorithms:
+            T = np.linspace(0, 1, self.slider_resolution.get())
+            canvas_size = (self.graph.winfo_width(), self.graph.winfo_height())
+            curves.append(
+                np.array(algo['algo'](*self.get_args(
+                    {
+                        "points": self.get_points,
+                        "weights": self.get_weights,
+                        "knots": self.entry_knots.get,
+                        "degree": self.entry_degree.get,
+                        "parameter": self.slider_parameter.get
+                    },
+                    algo=algo), T, canvas_size)))
+            colors.append(algo['color'])
 
-            self.graph.create_line(self.curve[i, 0],
-                                   self.curve[i, 1],
-                                   self.curve[i + 1, 0],
-                                   self.curve[i + 1, 1],
-                                   fill=colors[ic],
-                                   width=3,
-                                   tags="curve")
+        for k, curve in enumerate(curves):
+            for i in range(0, curve.shape[0] - 1):
+                self.graph.create_line(curve[i, 0],
+                                       curve[i, 1],
+                                       curve[i + 1, 0],
+                                       curve[i + 1, 1],
+                                       fill=colors[k],
+                                       width=3,
+                                       tags="curve")
+
+        # Animated algo treatment
+        for animated_algo in animated_algorithms:
+            self.animate(animated_algo, animated_algo['animated']['steps'],
+                         animated_algo['animated']["interval"])
 
     # Event handling
     def find_closest_with_tag(self, x, y, radius, tag):
@@ -281,7 +359,7 @@ class CurveEditorWindow(Tk):
     def handle_canvas_click(self, event):
         self.reset_selection()
 
-        if self.edit_types.get() == "add":
+        if self.edit_mode.get() == "add":
             item = self.create_point(event.x, event.y, "red")
             self.update_pos_entry(item)
             points = self.get_points()
@@ -296,17 +374,17 @@ class CurveEditorWindow(Tk):
 
                 self.draw_curve()
 
-        elif self.edit_types.get() == "remove":
+        elif self.edit_mode.get() == "remove":
             self._selected_data[
                 'item'], coords, _ = self.find_closest_with_tag(
                     event.x, event.y, 3 * self.radius, "control_points")
             if self._selected_data['item'] is not None:
                 self.graph.delete(self._selected_data['item'])
-
+                self.n_points -= 1
                 self.draw_polygon()
                 self.draw_curve()
 
-        elif self.edit_types.get() == "drag":
+        elif self.edit_mode.get() == "drag":
             self._selected_data[
                 'item'], coords, _ = self.find_closest_with_tag(
                     event.x, event.y, 3 * self.radius, "control_points")
@@ -333,13 +411,13 @@ class CurveEditorWindow(Tk):
 
     def handle_drag_stop(self, event):
         """End drag of an object"""
-        if self.edit_types.get() != "drag":
+        if self.edit_mode.get() != "drag":
             return
         self.reset_selection()
 
     def handle_drag(self, event):
         """Handle dragging of an object"""
-        if self.edit_types.get() != "drag" or self._selected_data[
+        if self.edit_mode.get() != "drag" or self._selected_data[
                 'item'] is None or "control_points" not in self.graph.gettags(
                     self._selected_data['item']):
             return
@@ -358,7 +436,7 @@ class CurveEditorWindow(Tk):
         self.draw_curve()
 
     def update_weight(self, event):
-        if self.edit_types.get(
+        if self.edit_mode.get(
         ) != "select" or self._selected_data['item'] is None:
             return
 
@@ -375,7 +453,7 @@ class CurveEditorWindow(Tk):
         self.entry_position_y.insert(0, int(coords[1]))
 
     def update_pos(self, event):
-        if self.edit_types.get(
+        if self.edit_mode.get(
         ) != "select" or self._selected_data['item'] is None:
             return
 
@@ -387,27 +465,73 @@ class CurveEditorWindow(Tk):
         self.draw_polygon()
         self.draw_curve()
 
-    def get_args(self, kwargs, weighted, knotted):
-        if weighted and knotted:
-            return (np.array(kwargs['points']()),
-                    np.array(kwargs['weights']()), np.array(kwargs['knots']()),
-                    kwargs['T'], kwargs['canvas_size'])
-        elif weighted:
-            return (np.array(kwargs['points']()),
-                    np.array(kwargs['weights']()), kwargs['T'],
-                    kwargs['canvas_size'])
-        elif knotted:
-            return (np.array(kwargs['points']()), np.array(kwargs['knots']()),
-                    kwargs['T'], kwargs['canvas_size'])
-        else:
-            return (np.array(kwargs['points']()), kwargs['T'],
-                    kwargs['canvas_size'])
+    def is_pointed(self, algo):
+        return 'pointed' in algo and algo['pointed']
+
+    def is_weighted(self, algo):
+        return 'weighted' in algo and algo['weighted']
+
+    def is_knotted(self, algo):
+        return 'knotted' in algo and algo['knotted']
+
+    def is_parametered(self, algo):
+        return "parametered" in algo and algo['parametered']
+
+    def get_args(self, kwargs, algo):
+        args = []
+        if self.is_pointed(algo):
+            args.append(np.array(kwargs['points']()))
+        if self.is_weighted(algo):
+            args.append(np.array(kwargs['weights']()))
+        if self.is_knotted(algo):
+            args.append(np.array(kwargs['knots']()))
+            args.append(int(kwargs['degree']()))
+        if self.is_parametered(algo):
+            args.append(float(kwargs['parameter']()))
+
+        return args
+
+    def handle_algo_selection(self):
+        self.frame_weights_sliders.pack_forget()
+        self.frame_knots_entry.pack_forget()
+        self.frame_parameter.pack_forget()
+
+        # Show only necessary edition tools
+        weighted = False
+        knotted = False
+        parametered = None
+        for i, curve_type in enumerate(self.curve_types):
+            if curve_type.get() != 0:
+                weighted = weighted or self.is_weighted(
+                    self.compute_algorithms[i])
+                knotted = knotted or self.is_knotted(
+                    self.compute_algorithms[i])
+                parametered = parametered or self.is_parametered(
+                    self.compute_algorithms[i])
+
+        if weighted:
+            self.frame_weights_sliders.pack(fill="x")
+        if knotted:
+            self.frame_knots_entry.pack(fill="x")
+        if parametered is not None:
+            self.frame_parameter.pack(fill="x")
+
+        self.draw_curve()
+
+    def uniform_fill(self, event):
+        p = int(self.entry_degree.get())
+        values = [0.0 for _ in range(p + 1)]
+        for k in range(1, self.n_points - p):
+            values.append(k / (self.n_points - p))
+        values.extend([1.0 for _ in range(p + 1)])
+
+        self.entry_knots.set(values)
 
 
 # ---------- Here add algorithms ----------
 
 
-def DeCasteljau(points, T, canvas_size):
+def DeCasteljau(points, T, canvas_size=None):
     n = points.shape[0] - 1
     result = []
     for t in T:
@@ -424,7 +548,7 @@ def DeCasteljau(points, T, canvas_size):
 def RationalDeCasteljau(points, weights, T, canvas_size):
     homogeneous_points = points * weights[:, np.newaxis]
     homogeneous_points = np.concatenate(
-        (homogeneous_points, weights.reshape((5, 1))), axis=1)
+        (homogeneous_points, weights.reshape((len(weights), 1))), axis=1)
 
     homogeneous_result = DeCasteljau(homogeneous_points, T, canvas_size)
 
@@ -433,12 +557,9 @@ def RationalDeCasteljau(points, weights, T, canvas_size):
     return result
 
 
-def DeCasteljauWithCircle(points, T, canvas_size):
-    result = DeCasteljau(points, T, canvas_size)
-
-    # Separation of curves
-    result.append(np.array([np.nan, np.nan]))
-    r = min(*canvas_size) / 2 - 40
+def circle(points, T, canvas_size):
+    result = []
+    r = min(*canvas_size) / 8
     for t in T:
         cx = canvas_size[0] / 2
         cy = canvas_size[1] / 2
@@ -448,16 +569,33 @@ def DeCasteljauWithCircle(points, T, canvas_size):
     return result
 
 
-def BothDeCastelJau(points, weights, T, canvas_size):
-    result = DeCasteljau(points, T, canvas_size)
-    result.append([np.nan, np.nan])
-    result.extend(RationalDeCasteljau(points, weights, T, canvas_size))
+def quarterCircle(T, canvas_size):
+    result = []
+    r = min(*canvas_size) / 3
+    for t in T:
+        cx = canvas_size[0] / 2
+        cy = canvas_size[1] / 2
+        result.append(
+            [cx + r * np.cos(t * np.pi / 2), cy + r * np.sin(t * np.pi / 2)])
 
     return result
 
 
-def DeBoor(points, knots, T, canvas_size):
-    p = len(knots) - len(points) - 1  # degree
+def CircleApprox4(T, canvas_size, step):
+    alpha = step
+    r = min(*canvas_size) / 3
+    cx = canvas_size[0] / 2
+    cy = canvas_size[1] / 2
+
+    points = np.array([[1, 0], [1, alpha], [alpha, 1], [0, 1]]) * r + np.array(
+        [cx, cy])
+    result = DeCasteljau(points, T, canvas_size)
+
+    return result
+
+
+def DeBoor(points, knots, p, T, canvas_size):
+    assert len(knots) - len(points) - 1
     result = []
 
     # knots interval index initialization
@@ -488,51 +626,188 @@ def DeBoor(points, knots, T, canvas_size):
                 d[j] = (1.0 - alpha) * d[j - 1] + alpha * d[j]
 
         result.append(d[p])
-
     return result
 
 
-def RatinalDeBoor(points, weights, knots, T, canvas_size):
+def RationalDeBoor(points, weights, knots, p, T, canvas_size):
     homogeneous_points = points * weights[:, np.newaxis]
     homogeneous_points = np.concatenate(
-        (homogeneous_points, weights.reshape((5, 1))), axis=1)
+        (homogeneous_points, weights.reshape((len(weights), 1))), axis=1)
 
-    homogeneous_result = DeBoor(homogeneous_points, knots, T, canvas_size)
+    homogeneous_result = DeBoor(homogeneous_points, knots, p, T, canvas_size)
 
     result = [p[:-1] / p[-1] for p in homogeneous_result]
     return result
+
+
+def CubicSpline(points, resolution):
+    U = np.linspace(0, 1, resolution)
+    result = []
+    for k in range(0, len(points) - 3, 3):
+        result.extend(
+            DeCasteljau(
+                np.array(
+                    [points[k], points[k + 1], points[k + 2], points[k + 3]]),
+                U))
+
+    return result
+
+
+def getHermiteSplinePoints(points, m):
+    spline_points = []
+    for k in range(len(points) - 1):
+        spline_points.extend([
+            points[k], points[k] + (1 / 3) * m[k],
+            points[k + 1] - (1 / 3) * m[k + 1]
+        ])
+    spline_points.append(points[-1])
+
+    return spline_points
+
+
+def SplineHermiteAutomatic(points, c, T, canvas_size):
+    m = [points[1] - points[0]
+         ] + [(1 - c) * (points[i + 1] - points[i - 1]) / 2
+              for i in range(1, len(points) - 1)] \
+        + [points[-1] - points[-2]]
+
+    return CubicSpline(getHermiteSplinePoints(points, m),
+                       int(len(T) / len(points)))
+
+
+def SplineHermiteC2(points, T, canvas_size):
+    N = len(points) - 2
+    linf = [1 for _ in range(N + 1)]
+    ldiag = [2] + [4 for _ in range(N)] + [2]
+    b = [3 * (points[1] - points[0])
+         ] + [3 * (points[i + 1] - points[i - 1])
+              for i in range(1, N + 1)] + [3 * (points[-1] - points[-2])]
+
+    m = solve(linf, ldiag, b)
+
+    return CubicSpline(getHermiteSplinePoints(points, m),
+                       int(len(T) / len(points)))
+
+
+def SplineHermite(points, T, canvas_size):
+    U = T * (len(points) - 1)
+
+    result = []
+    k = 0
+    t = []
+    for u in U:
+        while 3 * (k + 1) < len(points) and u > k + 1:
+            result.extend(
+                DeCasteljau(
+                    np.array([
+                        points[3 * k],
+                        (points[3 * k + 1] + 2 * points[3 * k]) / 3,
+                        (points[3 * k + 2] + 2 * points[3 * (k + 1)]) / 3,
+                        points[3 * (k + 1)]
+                    ]), np.array(t), canvas_size))
+            k += 1
+            t = []
+
+        t.append(u - k)
+
+    return result
+
+
+def Lagrange(points, T, canvas_size):
+    n = points.shape[0] - 1
+    U = T * n
+
+    result = []
+    for u in U:
+        r = points.copy()
+        for k in range(1, n + 1):
+            for i in range(0, n - k + 1):
+                r[i, :] = (i + k - u) / k * r[i, :] + (u - i) / k * r[i + 1, :]
+
+        result.append(r[0, :])
+
+    return result
+
+
+def plotErrorCircle(curves, T, canvas_size, steps):
+    circle = []
+    r = min(*canvas_size) / 3
+    for t in T:
+        cx = canvas_size[0] / 2
+        cy = canvas_size[1] / 2
+        circle.append(
+            [cx + r * np.cos(t * np.pi / 2), cy + r * np.sin(t * np.pi / 2)])
+
+    E = []
+    for curve in curves:
+        d = map(lambda x: np.linalg.norm(x[0] - x[1]), zip(curve, circle))
+        E.append(max(d))
+
+    print("alpha_min = ", steps[np.argmin(E)])
+    plt.plot(steps, E)
+    plt.xlabel("alpha")
+    plt.ylabel("E(alpha)")
+    plt.show()
 
 
 if __name__ == "__main__":
     window = CurveEditorWindow([{
         "name": "Bezier",
         "algo": DeCasteljau,
-        "weighted": False,
-        "knotted": False
+        "pointed": True,
+        "color": "green"
     }, {
         "name": "R-Bezier",
         "algo": RationalDeCasteljau,
+        "pointed": True,
         "weighted": True,
-        "knotted": False
+        "color": "lime"
     }, {
-        "name": "Both Bezier",
-        "algo": BothDeCastelJau,
-        "weighted": True,
-        "knotted": False
+        "name": "Circle",
+        "algo": quarterCircle,
+        "color": "magenta"
     }, {
-        "name": "Bezier+Circle",
-        "algo": DeCasteljauWithCircle,
-        "weighted": False,
-        "knotted": False
+        "name": "ApproxCircle",
+        "algo": CircleApprox4,
+        "color": "gray",
+        "animated": {
+            "steps": np.linspace(0, 1, 50),
+            "interval": 100,
+            "callback": plotErrorCircle
+        }
     }, {
         "name": "B-Spline",
         "algo": DeBoor,
-        "weighted": False,
-        "knotted": True
+        "pointed": True,
+        "knotted": True,
+        "color": "red"
     }, {
         "name": "NURBS",
-        "algo": RatinalDeBoor,
+        "algo": RationalDeBoor,
+        "pointed": True,
         "weighted": True,
-        "knotted": True
+        "knotted": True,
+        "color": "purple"
+    }, {
+        "name": "Auto H-Spline",
+        "algo": SplineHermiteAutomatic,
+        "pointed": True,
+        "parametered": True,
+        "color": "brown"
+    }, {
+        "name": "H-Spline",
+        "algo": SplineHermite,
+        "pointed": True,
+        "color": "black"
+    }, {
+        "name": "H-Spline-C2",
+        "algo": SplineHermiteC2,
+        "pointed": True,
+        "color": "black"
+    }, {
+        "name": "Lagrange",
+        "algo": Lagrange,
+        "pointed": True,
+        "color": "black"
     }])
     window.mainloop()
