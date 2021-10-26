@@ -9,3 +9,5 @@ This project is a simple curve editor built with python and tkinter.
 - choose the algorithm used to compute the curve (Bezier | Rational-Bezier | B-Spline | NURBS)
 - Change the resolution of final linear interpolation of the curve
 - Reset button clear all points
+
+![Alt text](/curve_demo.png?raw=true "Curve editor demo")
