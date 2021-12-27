@@ -3,7 +3,7 @@ from tkinter import Entry
 from tkinter import *
 
 
-class MultIntiEntry:
+class MultiEntry:
     def __init__(self, master, n, values, callback) -> None:
         assert len(values) == n
 
@@ -16,6 +16,7 @@ class MultIntiEntry:
 
         self.vcmd = (master.register(self.validate), '%d', '%i', '%P', '%s',
                      '%S', '%v', '%V', '%W')
+        self.entries = []
         self.build_entries(n)
 
         self.button_add_left = Button(self.frame_left, text="+", width=2)
@@ -26,7 +27,7 @@ class MultIntiEntry:
         self.button_rem_left.bind("<ButtonPress-1>", self.remove_left)
 
         self.place_entries()
-        self.set(values)
+        self.set(values, False)
 
         self.button_add_right = Button(self.frame_right, text="+", width=2)
         self.button_rem_right = Button(self.frame_right, text="-", width=2)
@@ -40,6 +41,9 @@ class MultIntiEntry:
         self.frame_right.pack(side="left")
 
     def build_entries(self, n):
+        for entry in self.entries:
+            entry.grid_forget()
+
         self.entries = [
             Entry(self.frame_entries,
                   width=6,
@@ -59,14 +63,14 @@ class MultIntiEntry:
     def get(self):
         return [float(entry.get()) for entry in self.entries]
 
-    def set(self, values):
-        if len(values) != len(self.entries):
-            self.build_entries(len(values))
-            self.place_entries()
+    def set(self, values, execute_callback=True):
+        self.build_entries(len(values))
+        self.place_entries()
 
         for i in range(len(self.entries)):
             self.entries[i].insert(0, f"{values[i]}")
-        self.callback()
+        if execute_callback:
+            self.callback()
 
     def place_entries(self):
         for i, entry in enumerate(self.entries):
@@ -80,7 +84,7 @@ class MultIntiEntry:
                   width=6,
                   validate='key',
                   validatecommand=self.vcmd))
-        self.entries[0].insert(0, "0")
+        self.entries[0].insert(0, self.entries[1].get())
 
         self.place_entries()
         self.callback()
@@ -91,7 +95,7 @@ class MultIntiEntry:
                   width=6,
                   validate='key',
                   validatecommand=self.vcmd))
-        self.entries[-1].insert(0, "1")
+        self.entries[-1].insert(0, self.entries[-2].get())
 
         self.place_entries()
         self.callback()
